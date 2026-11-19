@@ -178,7 +178,11 @@
               <th class="col-id">ID</th>
               <th class="col-text">Text</th>
               <th>Site</th>
-              <th>Text code</th>
+              <th class="col-code">Text code
+                <span class="code-toggle" role="group" aria-label="Show text code as">
+                  <button type="button" data-codemode="id" aria-pressed="true">ID</button><button type="button" data-codemode="str" aria-pressed="false">String</button>
+                </span>
+              </th>
               <th class="num">Signs</th>
               <th>Dir.</th>
               <th>Period</th>
@@ -205,6 +209,19 @@
             <option value="freq">Frequency (this corpus)</option>
             <option value="id">Sign number</option>
           </select>
+        </div>
+        <div class="field">
+          <label for="signGroup">Group look-alikes</label>
+          <select id="signGroup">
+            <option value="">Off</option>
+            <option value="tight">Tight (very close)</option>
+            <option value="medium">Medium</option>
+            <option value="loose">Loose (broad)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="signLike">Looks like sign #</label>
+          <input id="signLike" type="search" inputmode="numeric" placeholder="e.g. 740" />
         </div>
         <div class="field">
           <label for="signGlyph">Glyph</label>
@@ -534,6 +551,8 @@
 
   <!-- Data (embedded so the app works from file:// with no server) -->
   <script src="data/signs.js"></script>
+  <script src="data/sign_strings.js"></script>
+  <script src="data/sign_similarity.js"></script>
   <script src="data/texts.js"></script>
   <script src="data/icit.js"></script>
   <script src="data/geo.js"></script>

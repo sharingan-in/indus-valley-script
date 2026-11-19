@@ -45,6 +45,159 @@
     return lines.filter(function (l) { return l.length; });
   }
 
+  // ---------------------------------------------------------------- sign strings
+  // A string attached to each sign ID. Base values come from data/sign_strings.js;
+  // edits made in the app are kept in this browser (localStorage) on top of them.
+  var STR_KEY = 'ivs.signStrings';
+  var CODE_MODE_KEY = 'ivs.codeMode';
+  var FILE_STRINGS = Object.create(null);
+  Object.keys(window.SIGN_STRINGS || {}).forEach(function (k) {
+    FILE_STRINGS[pad3(k)] = String(window.SIGN_STRINGS[k]);
+  });
+  var LOCAL_STRINGS = (function () {
+    try {
+      var o = JSON.parse(localStorage.getItem(STR_KEY) || '{}'), out = Object.create(null);
+      Object.keys(o).forEach(function (k) { out[pad3(k)] = String(o[k]); });
+      return out;
+    } catch (e) { return Object.create(null); }
+  })();
+  function saveLocalStrings() {
+    try { localStorage.setItem(STR_KEY, JSON.stringify(LOCAL_STRINGS)); } catch (e) {}
+  }
+  function signString(code) {
+    code = pad3(code);
+    return code in LOCAL_STRINGS ? LOCAL_STRINGS[code] : (FILE_STRINGS[code] || '');
+  }
+  function setSignString(code, val) {
+    code = pad3(code);
+    val = String(val).trim();
+    if (val === (FILE_STRINGS[code] || '')) delete LOCAL_STRINGS[code];
+    else LOCAL_STRINGS[code] = val;
+    saveLocalStrings();
+  }
+  function allSignStrings() {
+    var out = {};
+    Object.keys(FILE_STRINGS).forEach(function (k) { if (FILE_STRINGS[k]) out[k] = FILE_STRINGS[k]; });
+    Object.keys(LOCAL_STRINGS).forEach(function (k) {
+      if (LOCAL_STRINGS[k]) out[k] = LOCAL_STRINGS[k]; else delete out[k];
+    });
+    return out;
+  }
+  // '+740-390-590+' -> '+ma-ra-ta+' : each sign ID is replaced by its string
+  // (or kept as the ID when it has none); separators, edges and '/' stay.
+  function codeAsStrings(tc) {
+    return String(tc == null ? '' : tc).replace(/\d+/g, function (d) { return signString(d) || d; });
+  }
+  function signStringsSource(map) {
+    var keys = Object.keys(map).sort();
+    var body = keys.map(function (k) { return '  ' + JSON.stringify(k) + ': ' + JSON.stringify(map[k]); }).join(',\n');
+    return '/* String attached to each sign ID.\n' +
+      '   Keys are 3-digit sign IDs (as used in text codes); values are free text.\n' +
+      '   Signs without an entry fall back to their numeric ID.\n' +
+      '   You can also edit strings in the app (click a sign → "String"): with the\n' +
+      '   file linked there, edits are written straight into this file. */\n' +
+      'window.SIGN_STRINGS = {\n' + body + (body ? '\n' : '') + '};\n';
+  }
+  function exportSignStrings() {
+    var src = signStringsSource(allSignStrings());
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    a.download = 'sign_strings.js';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  // Linking data/sign_strings.js (File System Access API, Chrome/Edge): once the
+  // user picks the file, every edit is written into it. The file handle is kept
+  // in IndexedDB so the link survives reloads (Chrome re-asks permission once
+  // per session, on the first edit).
+  var FILE_LINK = {
+    supported: typeof window.showOpenFilePicker === 'function',
+    handle: null, status: '', queue: Promise.resolve(), listeners: []
+  };
+  function linkStatus(msg) {
+    FILE_LINK.status = msg;
+    FILE_LINK.listeners.forEach(function (fn) { try { fn(); } catch (e) {} });
+  }
+  function idbStore(mode, fn) {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open('ivs-files', 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore('kv'); };
+      req.onerror = function () { reject(req.error); };
+      req.onsuccess = function () {
+        var tx = req.result.transaction('kv', mode), r = fn(tx.objectStore('kv'));
+        tx.oncomplete = function () { resolve(r && r.result); };
+        tx.onerror = function () { reject(tx.error); };
+      };
+    });
+  }
+  function rememberHandle(h) {
+    return idbStore('readwrite', function (s) { return h ? s.put(h, 'signStrings') : s.delete('signStrings'); })
+      .catch(function () {});
+  }
+  if (FILE_LINK.supported) {
+    idbStore('readonly', function (s) { return s.get('signStrings'); })
+      .then(function (h) { if (h) { FILE_LINK.handle = h; linkStatus('linked to ' + h.name); } })
+      .catch(function () {});
+  }
+  function parseStringsFile(text) {
+    var w = {};
+    new Function('window', text)(w); // the user's own data file
+    var out = Object.create(null), m = w.SIGN_STRINGS || {};
+    Object.keys(m).forEach(function (k) { if (String(m[k]).trim()) out[pad3(k)] = String(m[k]); });
+    return out;
+  }
+  // Read the file (to keep hand edits), apply this browser's edits, write it back.
+  function writeLinkedFile() {
+    var h = FILE_LINK.handle;
+    if (!h) return Promise.resolve(false);
+    FILE_LINK.queue = FILE_LINK.queue.then(function () {
+      return h.queryPermission({ mode: 'readwrite' }).then(function (p) {
+        return p === 'granted' ? p : h.requestPermission({ mode: 'readwrite' });
+      }).then(function (p) {
+        if (p !== 'granted') throw new Error('permission to write the file was not granted');
+        return h.getFile();
+      }).then(function (f) { return f.text(); }).then(function (text) {
+        var cur = parseStringsFile(text);
+        Object.keys(LOCAL_STRINGS).forEach(function (k) {
+          if (LOCAL_STRINGS[k]) cur[k] = LOCAL_STRINGS[k]; else delete cur[k];
+        });
+        return h.createWritable().then(function (w) {
+          return w.write(signStringsSource(cur)).then(function () { return w.close(); });
+        }).then(function () {
+          Object.keys(FILE_STRINGS).forEach(function (k) { delete FILE_STRINGS[k]; });
+          Object.keys(cur).forEach(function (k) { FILE_STRINGS[k] = cur[k]; });
+          Object.keys(LOCAL_STRINGS).forEach(function (k) { delete LOCAL_STRINGS[k]; });
+          saveLocalStrings();
+          linkStatus('saved to ' + h.name + ' ✓');
+          return true;
+        });
+      }).catch(function (err) {
+        linkStatus('could not write ' + h.name + ': ' + (err && err.message || err) + ' — kept in this browser');
+        return false;
+      });
+    });
+    return FILE_LINK.queue;
+  }
+  function linkFile() {
+    return window.showOpenFilePicker({
+      types: [{ description: 'sign_strings.js', accept: { 'text/javascript': ['.js'] } }]
+    }).then(function (hs) {
+      var h = hs[0];
+      if (h.name !== 'sign_strings.js' &&
+          !window.confirm('That file is "' + h.name + '", not sign_strings.js. Link it anyway?')) return;
+      FILE_LINK.handle = h;
+      rememberHandle(h);
+      linkStatus('linked to ' + h.name);
+      return writeLinkedFile();
+    }).catch(function (err) { if (!err || err.name !== 'AbortError') linkStatus('could not link file: ' + err); });
+  }
+  function unlinkFile() {
+    FILE_LINK.handle = null;
+    rememberHandle(null);
+    linkStatus('');
+  }
+
   // Precomputed per-row index for fast search / filtering.
   var norm = function (v) { return String(v == null ? '' : v).trim(); };
   var INDEX = ROWS.map(function (r) {
@@ -124,6 +277,7 @@
     // signs
     signSearch: $('signSearch'), signSort: $('signSort'), signGlyph: $('signGlyph'),
     signMeta: $('signMeta'), gallery: $('signGallery'),
+    signGroup: $('signGroup'), signLike: $('signLike'),
     aboutStats: $('aboutStats'),
     // modals
     detail: $('detail'), detailBody: $('detailBody'), detailTitle: $('detailTitle'),
@@ -132,7 +286,21 @@
   };
 
   // ---------------------------------------------------------------- state
-  var state = { view: 'texts', page: 1, pageSize: 25 };
+  var state = { view: 'texts', page: 1, pageSize: 25, codeMode: 'id' };
+  try { if (localStorage.getItem(CODE_MODE_KEY) === 'str') state.codeMode = 'str'; } catch (e) {}
+
+  function setCodeMode(mode) {
+    state.codeMode = mode === 'str' ? 'str' : 'id';
+    try { localStorage.setItem(CODE_MODE_KEY, state.codeMode); } catch (e) {}
+    syncCodeToggle();
+    renderTexts();
+  }
+  function syncCodeToggle() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-codemode]'), function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-codemode') === state.codeMode));
+    });
+  }
+  function displayCode(tc) { return state.codeMode === 'str' ? codeAsStrings(tc) : tc; }
 
   // ---------------------------------------------------------------- texts view
   var filtered = ROWS.map(function (_, i) { return i; }); // array of row indices
@@ -146,7 +314,8 @@
     filtered = [];
     for (var i = 0; i < ROWS.length; i++) {
       var ix = INDEX[i];
-      if (q && ix.hay.indexOf(q) === -1) continue;
+      if (q && ix.hay.indexOf(q) === -1 &&
+          codeAsStrings(ROWS[i][COL.text_code]).toLowerCase().indexOf(q) === -1) continue;
       if (site && ix.site !== site) continue;
       if (dir && ix.dir !== dir) continue;
       if (sign && !ix.codes[sign]) continue;
@@ -197,7 +366,9 @@
       tr.appendChild(tdId);
       tr.appendChild(tdText);
       tr.appendChild(cell(r[COL.site]));
-      tr.appendChild(cell(r[COL.text_code], 'mono'));
+      var tdCode = cell(displayCode(r[COL.text_code]), 'mono');
+      tdCode.title = state.codeMode === 'str' ? r[COL.text_code] : codeAsStrings(r[COL.text_code]);
+      tr.appendChild(tdCode);
       tr.appendChild(cell(r[COL.signs], 'num'));
       tr.appendChild(cell(r[COL.direction]));
       tr.appendChild(cell(r[COL.period]));
@@ -277,6 +448,13 @@
     code.className = 'detail-code';
     code.textContent = 'text code:  ' + (norm(r[COL.text_code]) || '—');
     signsBox.appendChild(code);
+    var strCode = codeAsStrings(r[COL.text_code]);
+    if (norm(r[COL.text_code]) && strCode !== r[COL.text_code]) {
+      var codeS = document.createElement('div');
+      codeS.className = 'detail-code';
+      codeS.textContent = 'as strings: ' + strCode;
+      signsBox.appendChild(codeS);
+    }
     body.appendChild(signsBox);
 
     // chronology + location (graphical)
@@ -354,35 +532,94 @@
     return img;
   }
 
+  // Visual similarity (precomputed by tools/build_similarity.py).
+  var SIM = window.SIGN_SIMILARITY || { groups: {}, neighbours: {} };
+  // chamfer distance (pixels on a 48px glyph) -> rough "% alike" for display
+  var simPct = function (d) { return Math.max(0, Math.round(100 * (1 - d / 3))); };
+  function lookAlikes(code, n) { return (SIM.neighbours[code] || []).slice(0, n || 12); }
+
+  function signCard(code, source, note) {
+    var card = document.createElement('div');
+    card.className = 'sign-card';
+    card.title = 'Sign ' + code + ' — click for details';
+    card.style.cursor = 'pointer';
+    var box = document.createElement('div'); box.className = 'box';
+    box.appendChild(glyphImg(code, source, true));
+    var cap = document.createElement('div');
+    cap.className = 'cap';
+    var freqTxt = HAS_ICIT[code] ? (icitTotal(code) + '×')
+      : (FREQ[code] ? (FREQ[code] + '×*') : '—');
+    cap.innerHTML = '<b>' + code + '</b> · ' + freqTxt;
+    card.appendChild(box); card.appendChild(cap);
+    var sstr = signString(code);
+    if (sstr) { var sc = document.createElement('div'); sc.className = 'cap-str'; sc.textContent = sstr; sc.title = sstr; card.appendChild(sc); }
+    if (note) { var nt = document.createElement('div'); nt.className = 'cap-sim'; nt.textContent = note; card.appendChild(nt); }
+    card.addEventListener('click', function () { openSignDetail(code); });
+    return card;
+  }
+  function galleryHead(title, sub) {
+    var h = document.createElement('div'); h.className = 'gal-head';
+    var t = document.createElement('span'); t.className = 't'; t.textContent = title; h.appendChild(t);
+    if (sub) { var u = document.createElement('span'); u.className = 'u'; u.textContent = sub; h.appendChild(u); }
+    return h;
+  }
+
   function renderSigns() {
     var q = els.signSearch.value.trim().replace(/\D/g, '');
     var sort = els.signSort.value;
     var source = els.signGlyph.value;
+    var groupLvl = els.signGroup.value;
+    var likeRaw = els.signLike.value.trim().replace(/\D/g, '');
+    var like = likeRaw ? pad3(likeRaw) : '';
     var list = ALL_SIGN_CODES.slice();
     if (q) list = list.filter(function (c) { return c.indexOf(q) !== -1; });
-    if (sort === 'icit') list.sort(function (a, b) { return icitTotal(b) - icitTotal(a) || (a < b ? -1 : 1); });
-    else if (sort === 'freq') list.sort(function (a, b) { return (FREQ[b] || 0) - (FREQ[a] || 0) || (a < b ? -1 : 1); });
-    else list.sort(function (a, b) { return a < b ? -1 : 1; });
+    var cmp;
+    if (sort === 'icit') cmp = function (a, b) { return icitTotal(b) - icitTotal(a) || (a < b ? -1 : 1); };
+    else if (sort === 'freq') cmp = function (a, b) { return (FREQ[b] || 0) - (FREQ[a] || 0) || (a < b ? -1 : 1); };
+    else cmp = function (a, b) { return a < b ? -1 : 1; };
+    list.sort(cmp);
 
-    els.signMeta.textContent = list.length + ' of ' + ALL_SIGN_CODES.length + ' signs';
-
-    var frag = document.createDocumentFragment();
-    list.forEach(function (code) {
-      var card = document.createElement('div');
-      card.className = 'sign-card';
-      card.title = 'Sign ' + code + ' — click for details';
-      card.style.cursor = 'pointer';
-      var box = document.createElement('div'); box.className = 'box';
-      box.appendChild(glyphImg(code, source, true));
-      var cap = document.createElement('div');
-      cap.className = 'cap';
-      var freqTxt = HAS_ICIT[code] ? (icitTotal(code) + '\u00d7')
-        : (FREQ[code] ? (FREQ[code] + '\u00d7*') : '\u2014');
-      cap.innerHTML = '<b>' + code + '</b> \u00b7 ' + freqTxt;
-      card.appendChild(box); card.appendChild(cap);
-      card.addEventListener('click', function () { openSignDetail(code); });
-      frag.appendChild(card);
-    });
+    var frag = document.createDocumentFragment(), shown = 0;
+    if (like) {
+      // the chosen sign first, then its closest look-alikes
+      var inList = Object.create(null); list.forEach(function (c) { inList[c] = 1; });
+      var near = lookAlikes(like, 24).filter(function (e) { return inList[e[0]]; });
+      if (!SIM.neighbours[like]) {
+        frag.appendChild(galleryHead('No similarity data for sign ' + like, 'it has no line drawing to compare'));
+      } else {
+        frag.appendChild(galleryHead('Signs that look like ' + like, 'closest first'));
+        frag.appendChild(signCard(like, source, 'chosen sign')); shown++;
+        near.forEach(function (e) { frag.appendChild(signCard(e[0], source, simPct(e[1]) + '% alike')); shown++; });
+      }
+      els.signMeta.textContent = shown + ' sign' + (shown === 1 ? '' : 's');
+    } else if (groupLvl) {
+      var pos = Object.create(null); list.forEach(function (c, i) { pos[c] = i; });
+      var grouped = Object.create(null);
+      var groups = (SIM.groups[groupLvl] || []).map(function (g) {
+        g.forEach(function (c) { grouped[c] = 1; });
+        return g.filter(function (c) { return c in pos; });
+      }).filter(function (g) { return g.length > 1; });
+      // order groups by the current sort (their best-placed member)
+      groups.sort(function (a, b) {
+        return Math.min.apply(null, a.map(function (c) { return pos[c]; })) -
+               Math.min.apply(null, b.map(function (c) { return pos[c]; }));
+      });
+      groups.forEach(function (g, gi) {
+        var names = [];
+        g.forEach(function (c) { var t = signString(c); if (t && names.indexOf(t) === -1) names.push(t); });
+        frag.appendChild(galleryHead('Group ' + (gi + 1) + ' · ' + g.length + ' signs', names.join(', ')));
+        g.forEach(function (c) { frag.appendChild(signCard(c, source)); shown++; });
+      });
+      var rest = list.filter(function (c) { return !grouped[c]; });
+      if (rest.length) {
+        frag.appendChild(galleryHead('No close look-alike', rest.length + ' signs'));
+        rest.forEach(function (c) { frag.appendChild(signCard(c, source)); shown++; });
+      }
+      els.signMeta.textContent = groups.length + ' groups · ' + shown + ' of ' + ALL_SIGN_CODES.length + ' signs';
+    } else {
+      list.forEach(function (c) { frag.appendChild(signCard(c, source)); shown++; });
+      els.signMeta.textContent = shown + ' of ' + ALL_SIGN_CODES.length + ' signs';
+    }
     els.gallery.innerHTML = '';
     els.gallery.appendChild(frag);
   }
@@ -418,6 +655,53 @@
     stats.appendChild(statBox(FREQ[code] || 0, 'in this corpus'));
     stats.appendChild(statBox(nsites, 'sites'));
     body.appendChild(stats);
+
+    // string attached to this sign ID (editable; saved in this browser, and in
+    // data/sign_strings.js when that file is linked)
+    var sedit = document.createElement('div'); sedit.className = 'sign-string';
+    var slbl = document.createElement('label'); slbl.htmlFor = 'signStringInput'; slbl.textContent = 'String';
+    var sin = document.createElement('input');
+    sin.id = 'signStringInput'; sin.type = 'text'; sin.autocomplete = 'off'; sin.spellcheck = false;
+    sin.placeholder = 'no string yet — shown as ' + code;
+    sin.value = signString(code);
+    var snote = document.createElement('span'); snote.className = 'sign-string-note';
+    function noteText() {
+      var fileV = FILE_STRINGS[code] || '', where;
+      if (!(code in LOCAL_STRINGS)) where = fileV ? 'from data/sign_strings.js' : '';
+      else where = 'saved in this browser only' + (fileV ? ' (file has “' + fileV + '”)' : '');
+      var link = FILE_LINK.handle ? FILE_LINK.status
+        : (FILE_LINK.supported ? 'File not linked — click “Link file” to write edits into data/sign_strings.js.'
+          : 'This browser can’t write files — use Export, or open the site in Chrome/Edge to link the file.');
+      return [where, link].filter(Boolean).join(' · ');
+    }
+    function refreshEditor() {
+      snote.textContent = noteText();
+      slink.textContent = FILE_LINK.handle ? 'Unlink file' : 'Link file…';
+    }
+    sin.addEventListener('input', debounce(function () {
+      setSignString(code, sin.value);
+      refreshEditor();
+      if (state.view === 'signs') renderSigns();
+      renderTexts();
+      if (FILE_LINK.handle) writeLinkedFile().then(refreshEditor);
+    }, 250));
+    var slink = document.createElement('button'); slink.type = 'button'; slink.className = 'btn ghost';
+    slink.title = 'Pick data/sign_strings.js so edits are saved straight into it';
+    slink.hidden = !FILE_LINK.supported;
+    slink.addEventListener('click', function () {
+      if (FILE_LINK.handle) { unlinkFile(); refreshEditor(); }
+      else linkFile().then(refreshEditor);
+    });
+    var sexp = document.createElement('button'); sexp.type = 'button'; sexp.className = 'btn ghost';
+    sexp.textContent = 'Export';
+    sexp.title = 'Download all strings as sign_strings.js (file + this browser’s edits)';
+    sexp.addEventListener('click', exportSignStrings);
+    var srow = document.createElement('div'); srow.className = 'sign-string-row';
+    srow.appendChild(sin); srow.appendChild(slink); srow.appendChild(sexp);
+    FILE_LINK.listeners = [refreshEditor];
+    sedit.appendChild(slbl); sedit.appendChild(srow); sedit.appendChild(snote);
+    refreshEditor();
+    body.appendChild(sedit);
 
     // geographic distribution in this corpus (mapped)
     var gsc = groupSignCounts('site'), gvals = {};
@@ -462,6 +746,33 @@
       switchView('texts'); applyFilters();
     });
     act.appendChild(btn); body.appendChild(act);
+
+    // visually similar signs
+    var alike = lookAlikes(code, 10);
+    if (alike.length) {
+      var simBox = document.createElement('div');
+      simBox.appendChild(el('h3', 'sd-h', 'Looks similar'));
+      var row = document.createElement('div'); row.className = 'alike-row';
+      alike.forEach(function (e) {
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'alike';
+        b.title = 'Sign ' + e[0] + ' · ' + simPct(e[1]) + '% alike' + (signString(e[0]) ? ' · ' + signString(e[0]) : '');
+        b.appendChild(glyphImg(e[0], 'svg', true));
+        b.appendChild(el('span', 'n', e[0]));
+        b.addEventListener('click', function () { openSignDetail(e[0]); });
+        row.appendChild(b);
+      });
+      simBox.appendChild(row);
+      var more = document.createElement('button'); more.className = 'btn ghost'; more.type = 'button';
+      more.textContent = 'Show all look-alikes of ' + code;
+      more.addEventListener('click', function () {
+        closeSignDetail();
+        els.signLike.value = code; els.signSearch.value = '';
+        switchView('signs'); renderSigns(); scrollTop();
+      });
+      var act2 = document.createElement('div'); act2.className = 'sign-actions'; act2.style.marginTop = '10px';
+      act2.appendChild(more); simBox.appendChild(act2);
+      sedit.after(simBox);
+    }
 
     els.signdetail.hidden = false;
     document.body.style.overflow = 'hidden';
@@ -1491,8 +1802,14 @@
       els.txtSearch.value = ''; els.siteFilter.value = ''; els.dirFilter.value = '';
       els.signFilter.value = ''; applyFilters();
     });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-codemode]'), function (b) {
+      b.addEventListener('click', function () { setCodeMode(b.getAttribute('data-codemode')); });
+    });
+    syncCodeToggle();
     els.signSearch.addEventListener('input', debounce(renderSigns, 180));
     els.signSort.addEventListener('change', renderSigns);
+    els.signGroup.addEventListener('change', renderSigns);
+    els.signLike.addEventListener('input', debounce(renderSigns, 180));
     els.signGlyph.addEventListener('change', renderSigns);
 
     // analysis view controls
